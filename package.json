@@ -1,6 +1,6 @@
 {
   "name": "@paybridge-np/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Official Model Context Protocol (MCP) server for PayBridgeNP — lets Claude, ChatGPT, Cursor, and any MCP-compatible AI assistant manage your PayBridgeNP account through natural language",
   "type": "module",
   "main": "./dist/index.js",
@@ -47,12 +47,14 @@
     "url": "git+https://github.com/paybridgenp/paybridgenp-mcp.git"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
-    "@paybridge/mcp-core": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

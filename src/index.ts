@@ -30,6 +30,7 @@ import {
   ScopeError,
   redactResponse,
   hasScope,
+  dispatchTool,
   MCP_CORE_VERSION,
   type ScopeContext,
   type ToolContext,
@@ -122,7 +123,7 @@ async function main(): Promise<void> {
     };
 
     try {
-      const raw = await tool.handler(args, ctx);
+      const raw = await dispatchTool(tool, args, ctx);
       const includePii = hasScope(scope, "pii:read");
       const safe = redactResponse(raw, { includePii });
       return {

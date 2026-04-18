@@ -245,6 +245,64 @@ function snake(s) {
   return s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`).replace(/^_/, "");
 }
 
+// ../mcp-core/src/dispatch.ts
+import { createHash } from "crypto";
+var AUDIT_PATH = "/v1/internal/mcp-audit";
+async function dispatchTool(def, args, ctx) {
+  const startedAt = Date.now();
+  const argsHash = hashArgs(args);
+  let result;
+  try {
+    result = await def.handler(args, ctx);
+  } catch (err) {
+    void emitAudit(ctx, {
+      tool: def.name,
+      elapsed_ms: Date.now() - startedAt,
+      result: "error",
+      args_hash: argsHash,
+      error_code: errorCode(err)
+    });
+    throw err;
+  }
+  void emitAudit(ctx, {
+    tool: def.name,
+    elapsed_ms: Date.now() - startedAt,
+    result: "ok",
+    args_hash: argsHash
+  });
+  return result;
+}
+async function emitAudit(ctx, payload) {
+  try {
+    await ctx.api.post(AUDIT_PATH, {
+      body: payload
+    });
+  } catch {
+  }
+}
+function hashArgs(args) {
+  const normalized = JSON.stringify(normalize(args));
+  return createHash("sha256").update(normalized).digest("hex");
+}
+function normalize(v) {
+  if (v === null || v === void 0) return null;
+  if (Array.isArray(v)) return v.map(normalize);
+  if (typeof v === "object") {
+    const sorted = {};
+    for (const k of Object.keys(v).sort()) {
+      const val = v[k];
+      if (val !== void 0) sorted[k] = normalize(val);
+    }
+    return sorted;
+  }
+  return v;
+}
+function errorCode(err) {
+  if (err instanceof ScopeError) return "missing_scope";
+  if (err instanceof McpToolError) return err.code;
+  return "tool_error";
+}
+
 // ../mcp-core/src/elicit.ts
 async function confirmDestructive(elicit, req) {
   if (!elicit) {
@@ -1275,7 +1333,7 @@ async function main() {
       elicit
     };
     try {
-      const raw = await tool.handler(args, ctx);
+      const raw = await dispatchTool(tool, args, ctx);
       const includePii = hasScope(scope, "pii:read");
       const safe = redactResponse(raw, { includePii });
       return {
