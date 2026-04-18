@@ -1188,6 +1188,7 @@ var get_checkout_session = {
 };
 
 // ../mcp-core/src/tools/links.ts
+var MAX_AMOUNT_PAISA = 1e7;
 var list_payment_links = {
   name: "list_payment_links",
   description: "List payment links for the API key's project. Payment links are shareable URLs (no code integration needed) that customers open to pay. Each link has title, amount or amount range, active state, used count, expiry.",
@@ -1225,6 +1226,113 @@ var get_payment_link = {
     const { link_id } = args;
     if (!link_id) throw new Error("link_id is required");
     return ctx.api.get(`/v1/payment-links/${encodeURIComponent(link_id)}`);
+  }
+};
+var create_payment_link = {
+  name: "create_payment_link",
+  description: "Create a new shareable payment link. Provide a fixed `amount` in PAISA (e.g., 250000 = Rs 2,500), or omit `amount` and pass `min_amount`/`max_amount` for an open-amount link the customer fills in. Returns the link id and its public `url` (paste into chat / email / SMS \u2014 customer pays via eSewa, Khalti, etc.). Optional fields lock to a single provider, set max uses, expiry, redirect URL, customer pre-fill.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: {
+        type: "string",
+        minLength: 1,
+        maxLength: 100,
+        description: "Short label shown on the hosted page (e.g., 'Course access \u2014 December batch')."
+      },
+      amount: {
+        type: "integer",
+        minimum: 1,
+        maximum: MAX_AMOUNT_PAISA,
+        description: "Fixed amount in paisa (1/100 of NPR). Max NPR 100,000 = 10000000 paisa. Omit for open-amount links."
+      },
+      min_amount: {
+        type: "integer",
+        minimum: 100,
+        description: "Open-amount lower bound in paisa (only when `amount` is omitted)."
+      },
+      max_amount: {
+        type: "integer",
+        maximum: MAX_AMOUNT_PAISA,
+        description: "Open-amount upper bound in paisa (only when `amount` is omitted)."
+      },
+      description: {
+        type: "string",
+        maxLength: 500,
+        description: "Longer description shown on the hosted page."
+      },
+      provider: {
+        type: "string",
+        enum: ["esewa", "khalti", "connectips", "hamropay", "imepay"],
+        description: "Lock to a single provider. Omit to let the customer pick."
+      },
+      max_uses: {
+        type: "integer",
+        minimum: 1,
+        maximum: 1e4,
+        description: "Cap how many times this link can be paid. Omit for unlimited."
+      },
+      expires_at: {
+        type: "string",
+        format: "date-time",
+        description: "ISO timestamp when the link stops accepting payments. Max 1 year out."
+      },
+      redirect_url: {
+        type: "string",
+        format: "uri",
+        description: "https:// URL the customer is sent to after a successful payment."
+      },
+      customer: {
+        type: "object",
+        description: "Optional pre-fill of the customer fields on the hosted page.",
+        properties: {
+          name: { type: "string", maxLength: 100 },
+          email: { type: "string", format: "email" },
+          phone: { type: "string", maxLength: 20 }
+        },
+        additionalProperties: false
+      },
+      reference_id: {
+        type: "string",
+        maxLength: 100,
+        description: "Your own external id (invoice number, etc.). Returned on every webhook tied to this link."
+      },
+      metadata: {
+        type: "object",
+        additionalProperties: true,
+        description: "Free-form key/value pairs returned in webhooks + visible in the dashboard."
+      }
+    },
+    required: ["title"],
+    additionalProperties: false
+  },
+  annotations: { destructiveHint: true, idempotentHint: false, title: "Create payment link" },
+  requiredScopes: ["links:write"],
+  async handler(args, ctx) {
+    const a = args;
+    if (!a.title || a.title.trim().length === 0) {
+      throw new McpToolError("invalid_request", "title is required", 400);
+    }
+    if (a.amount === void 0 && a.min_amount === void 0 && a.max_amount === void 0) {
+    }
+    return ctx.api.post("/v1/payment-links", {
+      body: {
+        title: a.title,
+        amount: a.amount,
+        minAmount: a.min_amount,
+        maxAmount: a.max_amount,
+        description: a.description,
+        provider: a.provider,
+        maxUses: a.max_uses,
+        expiresAt: a.expires_at,
+        redirectUrl: a.redirect_url,
+        customerName: a.customer?.name,
+        customerEmail: a.customer?.email,
+        customerPhone: a.customer?.phone,
+        referenceId: a.reference_id,
+        metadata: a.metadata
+      }
+    });
   }
 };
 
@@ -1291,6 +1399,7 @@ var READ_TOOLS = [
 var WRITE_TOOLS = [
   create_checkout_session,
   create_refund,
+  create_payment_link,
   create_webhook_endpoint,
   update_webhook_endpoint,
   delete_webhook_endpoint,
