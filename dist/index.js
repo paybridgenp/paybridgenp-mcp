@@ -1335,6 +1335,77 @@ var create_payment_link = {
     });
   }
 };
+var update_payment_link = {
+  name: "update_payment_link",
+  description: "Update an existing payment link's mutable fields (title, description, active flag, inactive_message, expires_at, max_uses, redirect_url, reference_id). Pass only the fields to change. Pass `null` to clear an optional field.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      link_id: { type: "string", description: "Payment link id (lnk_\u2026)." },
+      title: { type: "string", maxLength: 100 },
+      description: { type: ["string", "null"], maxLength: 500 },
+      active: { type: "boolean", description: "Set false to deactivate (auto-sets cancelled_at)." },
+      inactive_message: { type: ["string", "null"], maxLength: 300 },
+      expires_at: { type: ["string", "null"], format: "date-time" },
+      max_uses: { type: ["integer", "null"], minimum: 1 },
+      redirect_url: { type: ["string", "null"], format: "uri" },
+      reference_id: { type: ["string", "null"], maxLength: 100 }
+    },
+    required: ["link_id"],
+    additionalProperties: false
+  },
+  annotations: { destructiveHint: true, idempotentHint: true, title: "Update payment link" },
+  requiredScopes: ["links:write"],
+  async handler(args, ctx) {
+    const a = args;
+    if (!a.link_id) throw new McpToolError("invalid_request", "link_id is required", 400);
+    const { link_id, ...patch } = a;
+    return ctx.api.patch(`/v1/payment-links/${encodeURIComponent(link_id)}`, {
+      body: {
+        // Translate snake_case → camelCase for the apps/api PATCH body.
+        title: patch.title,
+        description: patch.description,
+        active: patch.active,
+        inactiveMessage: patch.inactive_message,
+        expiresAt: patch.expires_at,
+        maxUses: patch.max_uses,
+        redirectUrl: patch.redirect_url,
+        referenceId: patch.reference_id
+      }
+    });
+  }
+};
+var cancel_payment_link = {
+  name: "cancel_payment_link",
+  description: "Soft-deactivate a payment link. The link stays in the dashboard with all its history but stops accepting new payments. Reversible via update_payment_link with active=true. Use this when you want to stop a link in flight; use delete_payment_link to permanently remove a link that has never been used.",
+  inputSchema: idOnlySchema("link_id", "Payment link id (lnk_\u2026)."),
+  annotations: { destructiveHint: true, idempotentHint: true, title: "Cancel payment link" },
+  requiredScopes: ["links:write"],
+  async handler(args, ctx) {
+    const { link_id } = args;
+    if (!link_id) throw new McpToolError("invalid_request", "link_id is required", 400);
+    return ctx.api.post(`/v1/payment-links/${encodeURIComponent(link_id)}/cancel`);
+  }
+};
+var delete_payment_link = {
+  name: "delete_payment_link",
+  description: "Permanently delete a payment link. Only allowed if the link has never been used (used_count = 0). For used links, call cancel_payment_link instead. Always asks for confirmation.",
+  inputSchema: idOnlySchema("link_id", "Payment link id (lnk_\u2026)."),
+  annotations: { destructiveHint: true, title: "Delete payment link" },
+  requiredScopes: ["links:write"],
+  async handler(args, ctx) {
+    const { link_id } = args;
+    if (!link_id) throw new McpToolError("invalid_request", "link_id is required", 400);
+    const ok = await confirmDestructive(ctx.elicit, {
+      message: `Permanently delete payment link ${link_id}? This cannot be undone. (Cancel it instead to keep history.)`,
+      summary: { link_id, action: "delete (irreversible)" }
+    });
+    if (!ok) {
+      throw new McpToolError("user_cancelled", "Delete cancelled by user.", 0);
+    }
+    return ctx.api.delete(`/v1/payment-links/${encodeURIComponent(link_id)}`);
+  }
+};
 
 // ../mcp-core/src/tools/analytics.ts
 var get_analytics_overview = {
@@ -1400,6 +1471,9 @@ var WRITE_TOOLS = [
   create_checkout_session,
   create_refund,
   create_payment_link,
+  update_payment_link,
+  cancel_payment_link,
+  delete_payment_link,
   create_webhook_endpoint,
   update_webhook_endpoint,
   delete_webhook_endpoint,
