@@ -180,6 +180,36 @@ var UNTRUSTED_FIELDS = /* @__PURE__ */ new Set([
   "reference_id",
   "inactive_message"
 ]);
+var PAISA_FIELDS = /* @__PURE__ */ new Set([
+  "amount",
+  "amount_paisa",
+  "amountPaisa",
+  "refunded_amount",
+  "refundedAmount",
+  "remaining_refundable",
+  "remainingRefundable",
+  "spend_cap_paisa",
+  "spendCapPaisa",
+  "total_refunded",
+  "totalRefunded",
+  "total_amount",
+  "totalAmount",
+  "min_amount",
+  "minAmount",
+  "max_amount",
+  "maxAmount",
+  "subtotal",
+  "tax_amount",
+  "taxAmount",
+  "gross_volume",
+  "grossVolume",
+  "net_volume",
+  "netVolume",
+  "refunds_total",
+  "refundsTotal",
+  "elicit_threshold_paisa",
+  "elicitThresholdPaisa"
+]);
 function redactSecrets(input) {
   let out = input;
   for (const [pattern, replacement] of SECRET_PATTERNS) {
@@ -233,13 +263,30 @@ function walk(value, opts, key) {
     return value.map((v) => walk(v, opts, key));
   }
   if (typeof value === "object") {
+    const src = value;
     const out = {};
-    for (const [k, v] of Object.entries(value)) {
+    for (const [k, v] of Object.entries(src)) {
       out[k] = walk(v, opts, k);
     }
+    addNprDisplayFields(src, out);
     return out;
   }
   return value;
+}
+function addNprDisplayFields(src, out) {
+  const currency = typeof src.currency === "string" && src.currency.length > 0 ? src.currency.toUpperCase() : "NPR";
+  for (const [k, v] of Object.entries(src)) {
+    if (!PAISA_FIELDS.has(k)) continue;
+    if (typeof v !== "number" || !Number.isFinite(v)) continue;
+    const base = stripPaisaSuffix(k);
+    const nprKey = `${base}_npr`;
+    const displayKey = `${base}_display`;
+    if (!(nprKey in out)) out[nprKey] = (v / 100).toFixed(2);
+    if (!(displayKey in out)) out[displayKey] = `${currency} ${(v / 100).toFixed(2)}`;
+  }
+}
+function stripPaisaSuffix(k) {
+  return k.replace(/_paisa$/i, "").replace(/Paisa$/, "");
 }
 function snake(s) {
   return s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`).replace(/^_/, "");
