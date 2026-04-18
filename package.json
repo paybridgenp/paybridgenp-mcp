@@ -1,0 +1,63 @@
+{
+  "name": "@paybridge-np/mcp",
+  "version": "0.1.0",
+  "description": "Official Model Context Protocol (MCP) server for PayBridgeNP — lets Claude, ChatGPT, Cursor, and any MCP-compatible AI assistant manage your PayBridgeNP account through natural language",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "paybridge-mcp": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "prepublishOnly": "tsup"
+  },
+  "keywords": [
+    "paybridge",
+    "paybridgenp",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "chatgpt",
+    "cursor",
+    "ai-agent",
+    "nepal",
+    "payments",
+    "esewa",
+    "khalti"
+  ],
+  "homepage": "https://paybridgenp.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paybridgenp/paybridgenp-mcp.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "@paybridge/mcp-core": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
+  }
+}
