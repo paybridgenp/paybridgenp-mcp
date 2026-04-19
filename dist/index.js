@@ -1034,6 +1034,28 @@ var update_customer = {
     return ctx.api.patch(`/v1/billing/customers/${encodeURIComponent(customer_id)}`, { body: rest });
   }
 };
+var add_customer_credit = {
+  name: "add_customer_credit",
+  description: "Add (or deduct, with a negative amount) credits to a customer's balance. Credits are applied automatically against future invoices before payment. Amount is in paisa (NPR \xD7 100).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      customer_id: { type: "string" },
+      amount: { type: "number", description: "Amount in paisa. Use negative to deduct." },
+      note: { type: "string", description: "Optional note for the credit entry." }
+    },
+    required: ["customer_id", "amount"],
+    additionalProperties: false
+  },
+  annotations: { destructiveHint: true, title: "Add customer credit" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const a = args;
+    return ctx.api.post(`/v1/billing/customers/${encodeURIComponent(a.customer_id)}/credit`, {
+      body: { amount: a.amount, note: a.note }
+    });
+  }
+};
 var create_subscription = {
   name: "create_subscription",
   description: "Subscribe a customer to a plan. The first invoice generates immediately (or after the plan's trial period if set).",
@@ -1042,7 +1064,9 @@ var create_subscription = {
     properties: {
       customer_id: { type: "string" },
       plan_id: { type: "string" },
-      start_date: { type: "string", format: "date-time", description: "Optional ISO timestamp; defaults to now." }
+      start_date: { type: "string", format: "date-time", description: "Optional ISO timestamp; defaults to now." },
+      quantity: { type: "number", description: "Per-seat multiplier (default 1). Only applies to per_unit plans." },
+      billing_anchor_day: { type: "number", description: "Pin the period-end to this calendar day (1-28) for month/quarter/year intervals." }
     },
     required: ["customer_id", "plan_id"],
     additionalProperties: false
@@ -1052,7 +1076,7 @@ var create_subscription = {
   async handler(args, ctx) {
     const a = args;
     return ctx.api.post("/v1/billing/subscriptions", {
-      body: { customerId: a.customer_id, planId: a.plan_id, startDate: a.start_date }
+      body: { customerId: a.customer_id, planId: a.plan_id, startDate: a.start_date, quantity: a.quantity, billingAnchorDay: a.billing_anchor_day }
     });
   }
 };
@@ -1122,14 +1146,68 @@ var cancel_subscription = {
     });
   }
 };
-var change_subscription_plan = {
-  name: "change_subscription_plan",
-  description: "Switch a subscription to a different plan. The new amount applies from the next billing period unless the plan API supports immediate proration.",
+var end_subscription_trial = {
+  name: "end_subscription_trial",
+  description: "End a subscription's trial immediately. Generates the first paid invoice and emails it to the customer. Idempotent \u2014 returns 409 if the trial is already ended.",
+  inputSchema: idOnlySchema("subscription_id", "Subscription id."),
+  annotations: { destructiveHint: true, title: "End subscription trial" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const a = args;
+    const ok = await confirmDestructive(ctx.elicit, {
+      message: `End trial for subscription ${a.subscription_id} now?`,
+      summary: {
+        subscription_id: a.subscription_id,
+        effect: "Generates first paid invoice immediately"
+      }
+    });
+    if (!ok) {
+      throw new McpToolError("user_cancelled", "End-trial rejected by user.", 0);
+    }
+    return ctx.api.post(
+      `/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/end-trial`,
+      { body: {} }
+    );
+  }
+};
+var extend_subscription_trial = {
+  name: "extend_subscription_trial",
+  description: "Push a subscription's trial end date further into the future. Only valid while the trial is still active. Re-arms the 3-day-before reminder.",
   inputSchema: {
     type: "object",
     properties: {
       subscription_id: { type: "string" },
-      plan_id: { type: "string", description: "New plan id to switch to." }
+      trial_ends_at: {
+        type: "string",
+        description: "New trial end (ISO 8601). Must be strictly after the current trial end."
+      }
+    },
+    required: ["subscription_id", "trial_ends_at"],
+    additionalProperties: false
+  },
+  annotations: { title: "Extend subscription trial" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const a = args;
+    return ctx.api.post(
+      `/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/extend-trial`,
+      { body: { trialEndsAt: a.trial_ends_at } }
+    );
+  }
+};
+var change_subscription_plan = {
+  name: "change_subscription_plan",
+  description: "Switch a subscription to a different plan. Default behaviour (proration_behavior='none') schedules the change for the next billing cycle. Pass proration_behavior='create_prorations' to apply immediately and generate a proration invoice for the net difference.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      subscription_id: { type: "string" },
+      plan_id: { type: "string", description: "New plan id to switch to." },
+      proration_behavior: {
+        type: "string",
+        enum: ["none", "create_prorations"],
+        description: "none = schedule for next period (default); create_prorations = apply now with proration invoice."
+      }
     },
     required: ["subscription_id", "plan_id"],
     additionalProperties: false
@@ -1140,8 +1218,520 @@ var change_subscription_plan = {
     const a = args;
     return ctx.api.post(
       `/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/change-plan`,
-      { body: { planId: a.plan_id } }
+      { body: { planId: a.plan_id, prorationBehavior: a.proration_behavior ?? "none" } }
     );
+  }
+};
+var preview_subscription_proration = {
+  name: "preview_subscription_proration",
+  description: "Preview the proration credit/debit for switching a subscription to a different plan mid-period. Returns creditAmount, debitAmount, and netAmount in paisa. No changes are committed.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      subscription_id: { type: "string" },
+      new_plan_id: { type: "string", description: "Plan id to preview switching to." }
+    },
+    required: ["subscription_id", "new_plan_id"],
+    additionalProperties: false
+  },
+  annotations: { readOnlyHint: true, title: "Preview plan change proration" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const a = args;
+    return ctx.api.get(
+      `/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/preview-proration?newPlanId=${encodeURIComponent(a.new_plan_id)}`
+    );
+  }
+};
+var list_coupons = {
+  name: "list_coupons",
+  description: "List discount coupons for the merchant. Each coupon has code, name, percent/amount off, duration (once/repeating/forever), and redemption counts.",
+  inputSchema: cursorAndLimitSchema,
+  annotations: { readOnlyHint: true, title: "List coupons" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const a = args;
+    const limit = clampLimit(a.limit);
+    const { offset } = decodeCursor(a.cursor);
+    const raw = await ctx.api.get("/v1/billing/coupons", { query: { limit, offset } });
+    return paginate(raw, limit, offset);
+  }
+};
+var get_coupon = {
+  name: "get_coupon",
+  description: "Fetch a single coupon by id.",
+  inputSchema: idOnlySchema("coupon_id", "Coupon id (e.g., cpn_abc123)."),
+  annotations: { readOnlyHint: true, title: "Get coupon" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const { coupon_id } = args;
+    return ctx.api.get(`/v1/billing/coupons/${encodeURIComponent(coupon_id)}`);
+  }
+};
+var create_coupon = {
+  name: "create_coupon",
+  description: "Create a reusable discount coupon. Either percentOff (1-100) or amountOff (paisa) must be set based on discountType. Duration 'repeating' requires durationInCycles.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      code: { type: "string", description: "Internal label, unique per merchant." },
+      name: { type: "string" },
+      discountType: { type: "string", enum: ["percent", "amount"] },
+      percentOff: { type: "number", minimum: 1, maximum: 100 },
+      amountOff: { type: "integer", minimum: 1, description: "Paisa (1 NPR = 100 paisa)." },
+      duration: { type: "string", enum: ["once", "repeating", "forever"] },
+      durationInCycles: { type: "integer", minimum: 1, description: "Required when duration='repeating'." },
+      maxRedemptions: { type: "integer", minimum: 1 },
+      redeemBy: { type: "string", description: "ISO 8601 expiry." },
+      appliesToPlanIds: { type: "array", items: { type: "string" } }
+    },
+    required: ["code", "name", "discountType", "duration"],
+    additionalProperties: false
+  },
+  annotations: { title: "Create coupon" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    return ctx.api.post("/v1/billing/coupons", { body: args });
+  }
+};
+var deactivate_coupon = {
+  name: "deactivate_coupon",
+  description: "Deactivate a coupon so it can't be redeemed by new subscriptions. Existing subscription discounts keep their applied rate. Irreversible \u2014 create a new coupon to replace.",
+  inputSchema: idOnlySchema("coupon_id", "Coupon id to deactivate."),
+  annotations: { destructiveHint: true, title: "Deactivate coupon" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { coupon_id } = args;
+    const ok = await confirmDestructive(ctx.elicit, {
+      message: `Deactivate coupon ${coupon_id}? New subscriptions can't use it anymore.`,
+      summary: { coupon_id }
+    });
+    if (!ok) throw new McpToolError("user_cancelled", "Deactivation rejected by user.", 0);
+    return ctx.api.delete(`/v1/billing/coupons/${encodeURIComponent(coupon_id)}`);
+  }
+};
+var list_promotion_codes = {
+  name: "list_promotion_codes",
+  description: "List customer-facing promotion codes that redeem coupons.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      cursor: { type: "string" },
+      limit: { type: "integer", minimum: 1, maximum: 100 },
+      coupon_id: { type: "string", description: "Filter to promo codes for this coupon." }
+    },
+    additionalProperties: false
+  },
+  annotations: { readOnlyHint: true, title: "List promotion codes" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const a = args;
+    const limit = clampLimit(a.limit);
+    const { offset } = decodeCursor(a.cursor);
+    const raw = await ctx.api.get("/v1/billing/promotion-codes", {
+      query: { limit, offset, ...a.coupon_id ? { couponId: a.coupon_id } : {} }
+    });
+    return paginate(raw, limit, offset);
+  }
+};
+var get_promotion_code = {
+  name: "get_promotion_code",
+  description: "Fetch a single promotion code by id.",
+  inputSchema: idOnlySchema("promotion_code_id", "Promotion code id (promo_xxx)."),
+  annotations: { readOnlyHint: true, title: "Get promotion code" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const { promotion_code_id } = args;
+    return ctx.api.get(`/v1/billing/promotion-codes/${encodeURIComponent(promotion_code_id)}`);
+  }
+};
+var create_promotion_code = {
+  name: "create_promotion_code",
+  description: "Create a customer-facing promotion code (e.g. 'LAUNCH50') that redeems an existing coupon. The code is case-insensitive and auto-uppercased.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      couponId: { type: "string" },
+      code: { type: "string", description: "Customer-facing code, unique per merchant." },
+      maxRedemptions: { type: "integer", minimum: 1 },
+      expiresAt: { type: "string", description: "ISO 8601 expiry (independent of coupon's redeemBy)." },
+      minimumAmount: { type: "integer", minimum: 0, description: "Minimum order total (paisa) required to redeem." },
+      firstTimeTransaction: { type: "boolean" }
+    },
+    required: ["couponId", "code"],
+    additionalProperties: false
+  },
+  annotations: { title: "Create promotion code" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    return ctx.api.post("/v1/billing/promotion-codes", { body: args });
+  }
+};
+var deactivate_promotion_code = {
+  name: "deactivate_promotion_code",
+  description: "Deactivate a promotion code. Existing redemptions remain valid.",
+  inputSchema: idOnlySchema("promotion_code_id", "Promotion code id."),
+  annotations: { destructiveHint: true, title: "Deactivate promotion code" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { promotion_code_id } = args;
+    return ctx.api.patch(`/v1/billing/promotion-codes/${encodeURIComponent(promotion_code_id)}`, {
+      body: { active: false }
+    });
+  }
+};
+var validate_promotion_code = {
+  name: "validate_promotion_code",
+  description: "Check whether a promotion code is currently valid and preview the discount it would apply. Read-only \u2014 does NOT redeem the code.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      code: { type: "string" },
+      customer_id: { type: "string" },
+      plan_id: { type: "string" },
+      amount: { type: "integer", minimum: 0, description: "Order total in paisa for minimum-amount check." }
+    },
+    required: ["code"],
+    additionalProperties: false
+  },
+  annotations: { readOnlyHint: true, title: "Validate promotion code" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const a = args;
+    return ctx.api.post("/v1/billing/promotion-codes/validate", {
+      body: { code: a.code, customerId: a.customer_id, planId: a.plan_id, amount: a.amount }
+    });
+  }
+};
+var apply_coupon_to_subscription = {
+  name: "apply_coupon_to_subscription",
+  description: "Attach a coupon (or promotion code) to an existing subscription. Takes effect on the next invoice. Deactivates any prior active discount on the same sub.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      subscription_id: { type: "string" },
+      coupon_id: { type: "string" },
+      promotion_code: { type: "string" }
+    },
+    required: ["subscription_id"],
+    additionalProperties: false
+  },
+  annotations: { title: "Apply coupon to subscription" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const a = args;
+    if (!a.coupon_id && !a.promotion_code) throw new Error("coupon_id or promotion_code is required");
+    return ctx.api.post(`/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/apply-coupon`, {
+      body: { couponId: a.coupon_id, promotionCode: a.promotion_code }
+    });
+  }
+};
+var remove_subscription_discount = {
+  name: "remove_subscription_discount",
+  description: "Remove the currently active discount from a subscription. Future invoices will be billed without discount.",
+  inputSchema: idOnlySchema("subscription_id", "Subscription id."),
+  annotations: { destructiveHint: true, title: "Remove subscription discount" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { subscription_id } = args;
+    return ctx.api.delete(`/v1/billing/subscriptions/${encodeURIComponent(subscription_id)}/discount`);
+  }
+};
+var get_tax_settings = {
+  name: "get_tax_settings",
+  description: "Fetch the merchant's tax configuration (VAT for Nepal). Returns { enabled, rate_bps, registration_number, label }. rate_bps is basis points \u2014 1300 = 13.00%.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  annotations: { readOnlyHint: true, title: "Get tax settings" },
+  requiredScopes: ["billing:read"],
+  async handler(_args, ctx) {
+    return ctx.api.get("/v1/billing/settings/tax");
+  }
+};
+var update_tax_settings = {
+  name: "update_tax_settings",
+  description: "Update the merchant's tax configuration. Changes affect ONLY invoices created after the change \u2014 historical invoices keep their snapshot.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      enabled: { type: "boolean" },
+      rateBps: { type: "integer", minimum: 0, maximum: 1e4, description: "Basis points (1300 = 13.00%)." },
+      registrationNumber: { type: "string", description: "Nepal PAN/VAT registration number." },
+      label: { type: "string", maxLength: 32, description: "Printed as e.g. 'VAT (13%)'." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Update tax settings" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    return ctx.api.patch("/v1/billing/settings/tax", { body: args });
+  }
+};
+var list_dunning_policies = {
+  name: "list_dunning_policies",
+  description: "List all dunning policies for the merchant. Dunning policies control how overdue invoices are retried (intervals, final action).",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  annotations: { readOnlyHint: true, title: "List dunning policies" },
+  requiredScopes: ["billing:read"],
+  async handler(_args, ctx) {
+    return ctx.api.get("/v1/billing/dunning/policies");
+  }
+};
+var create_dunning_policy = {
+  name: "create_dunning_policy",
+  description: "Create a dunning policy. retryIntervalsDays is an array of days-since-overdue at which reminders are sent (e.g. [1,3,7]). finalAction is what happens when retries are exhausted.",
+  inputSchema: {
+    type: "object",
+    required: ["name", "retryIntervalsDays"],
+    properties: {
+      name: { type: "string", minLength: 1, description: "Human-readable name, e.g. 'Standard 3-strike'." },
+      retryIntervalsDays: {
+        type: "array",
+        items: { type: "integer", minimum: 1, maximum: 365 },
+        minItems: 1,
+        maxItems: 10,
+        description: "Days after overdue for each retry attempt."
+      },
+      finalAction: {
+        type: "string",
+        enum: ["cancel", "pause", "mark_uncollectible"],
+        description: "What to do when all retries are exhausted. Defaults to 'cancel'."
+      },
+      isDefault: { type: "boolean", description: "Set as the merchant default policy." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Create dunning policy" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    return ctx.api.post("/v1/billing/dunning/policies", { body: args });
+  }
+};
+var get_dunning_invoice_status = {
+  name: "get_dunning_invoice_status",
+  description: "Get the current dunning state for an invoice \u2014 status, attempt count, next retry time, and full attempt history.",
+  inputSchema: {
+    type: "object",
+    required: ["invoice_id"],
+    properties: { invoice_id: { type: "string", description: "Invoice id." } },
+    additionalProperties: false
+  },
+  annotations: { readOnlyHint: true, title: "Get invoice dunning status" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const { invoice_id } = args;
+    return ctx.api.get(`/v1/billing/dunning/invoices/${encodeURIComponent(invoice_id)}/dunning`);
+  }
+};
+var stop_invoice_dunning = {
+  name: "stop_invoice_dunning",
+  description: "Stop the dunning cycle for an overdue invoice. No further reminders will be sent and no final action will be applied.",
+  inputSchema: {
+    type: "object",
+    required: ["invoice_id"],
+    properties: { invoice_id: { type: "string", description: "Invoice id." } },
+    additionalProperties: false
+  },
+  annotations: { title: "Stop invoice dunning" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { invoice_id } = args;
+    await confirmDestructive(ctx, `Stop dunning for invoice ${invoice_id}? No further reminders will be sent.`);
+    return ctx.api.post(`/v1/billing/dunning/invoices/${encodeURIComponent(invoice_id)}/dunning/stop`, { body: {} });
+  }
+};
+var retry_invoice_dunning_now = {
+  name: "retry_invoice_dunning_now",
+  description: "Immediately trigger the next dunning retry for an invoice \u2014 sends a reminder email and advances the dunning state.",
+  inputSchema: {
+    type: "object",
+    required: ["invoice_id"],
+    properties: { invoice_id: { type: "string", description: "Invoice id." } },
+    additionalProperties: false
+  },
+  annotations: { title: "Retry invoice dunning now" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { invoice_id } = args;
+    return ctx.api.post(`/v1/billing/dunning/invoices/${encodeURIComponent(invoice_id)}/dunning/retry-now`, { body: {} });
+  }
+};
+var report_subscription_usage = {
+  name: "report_subscription_usage",
+  description: "Report a usage event for a metered subscription. Use action=increment (default) to add to the running total, or action=set for gauge metrics. Pass idempotency_key to prevent double-counting.",
+  inputSchema: {
+    type: "object",
+    required: ["subscription_id", "quantity"],
+    properties: {
+      subscription_id: { type: "string", description: "Metered subscription id." },
+      quantity: { type: "number", description: "Usage quantity. Must be >= 0." },
+      action: { type: "string", enum: ["increment", "set"], description: "increment (default) or set." },
+      recorded_at: { type: "string", description: "ISO 8601 timestamp for when usage occurred (defaults to now)." },
+      idempotency_key: { type: ["string", "null"], description: "Unique key to prevent double-counting." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Report subscription usage" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const a = args;
+    return ctx.api.post(`/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/usage`, {
+      body: { quantity: a.quantity, action: a.action, recorded_at: a.recorded_at, idempotency_key: a.idempotency_key }
+    });
+  }
+};
+var get_subscription_usage_summary = {
+  name: "get_subscription_usage_summary",
+  description: "Get the aggregated usage summary (quantity, record count) for the current billing period of a metered subscription.",
+  inputSchema: idOnlySchema("subscription_id", "Metered subscription id."),
+  annotations: { readOnlyHint: true, title: "Get usage summary" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const { subscription_id } = args;
+    return ctx.api.get(`/v1/billing/subscriptions/${encodeURIComponent(subscription_id)}/usage`);
+  }
+};
+var create_invoice_item = {
+  name: "create_invoice_item",
+  description: "Add a one-off charge to a subscription that will be included (and consumed) when the next invoice is generated.",
+  inputSchema: {
+    type: "object",
+    required: ["subscription_id", "description", "amount"],
+    properties: {
+      subscription_id: { type: "string", description: "Subscription id." },
+      description: { type: "string", description: "Line item description shown on the invoice." },
+      amount: { type: "number", description: "Amount in paisa. Must be > 0." },
+      quantity: { type: "number", description: "Quantity multiplier (default 1)." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Create invoice item" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const a = args;
+    return ctx.api.post(`/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/invoice-items`, {
+      body: { description: a.description, amount: a.amount, quantity: a.quantity }
+    });
+  }
+};
+var list_invoice_items = {
+  name: "list_invoice_items",
+  description: "List pending one-off invoice items for a subscription that will be consumed on the next invoice.",
+  inputSchema: idOnlySchema("subscription_id", "Subscription id."),
+  annotations: { readOnlyHint: true, title: "List invoice items" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const { subscription_id } = args;
+    return ctx.api.get(`/v1/billing/subscriptions/${encodeURIComponent(subscription_id)}/invoice-items`);
+  }
+};
+var delete_invoice_item = {
+  name: "delete_invoice_item",
+  description: "Remove a pending one-off invoice item from a subscription before it is invoiced.",
+  inputSchema: {
+    type: "object",
+    required: ["subscription_id", "item_id"],
+    properties: {
+      subscription_id: { type: "string", description: "Subscription id." },
+      item_id: { type: "string", description: "Invoice item id to delete." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Delete invoice item" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { subscription_id, item_id } = args;
+    return ctx.api.delete(`/v1/billing/subscriptions/${encodeURIComponent(subscription_id)}/invoice-items/${encodeURIComponent(item_id)}`);
+  }
+};
+var update_subscription_quantity = {
+  name: "update_subscription_quantity",
+  description: "Update the seat count (quantity) for a per-unit subscription. The new amount takes effect on the next invoice.",
+  inputSchema: {
+    type: "object",
+    required: ["subscription_id", "quantity"],
+    properties: {
+      subscription_id: { type: "string", description: "Subscription id." },
+      quantity: { type: "integer", minimum: 1, description: "New quantity (number of seats)." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Update subscription quantity" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { subscription_id, quantity } = args;
+    return ctx.api.patch(`/v1/billing/subscriptions/${encodeURIComponent(subscription_id)}/quantity`, {
+      body: { quantity }
+    });
+  }
+};
+var list_usage_records = {
+  name: "list_usage_records",
+  description: "List raw usage records for a metered subscription. Useful for auditing or debugging usage reporting.",
+  inputSchema: {
+    type: "object",
+    required: ["subscription_id"],
+    properties: {
+      subscription_id: { type: "string", description: "Metered subscription id." },
+      limit: { type: "integer", minimum: 1, maximum: 100, description: "Number of records to return (default 50)." }
+    },
+    additionalProperties: false
+  },
+  annotations: { readOnlyHint: true, title: "List usage records" },
+  requiredScopes: ["billing:read"],
+  async handler(args, ctx) {
+    const { subscription_id, limit } = args;
+    const qs = limit ? `?limit=${limit}` : "";
+    return ctx.api.get(`/v1/billing/subscriptions/${encodeURIComponent(subscription_id)}/usage/records${qs}`);
+  }
+};
+var update_dunning_policy = {
+  name: "update_dunning_policy",
+  description: "Update an existing dunning policy's name, retry intervals, or final action.",
+  inputSchema: {
+    type: "object",
+    required: ["policy_id"],
+    properties: {
+      policy_id: { type: "string", description: "Dunning policy id." },
+      name: { type: "string", description: "New display name." },
+      retry_intervals_days: { type: "array", items: { type: "integer", minimum: 1 }, description: "Days after overdue to retry (e.g. [1, 3, 7])." },
+      final_action: { type: "string", enum: ["cancel", "pause", "mark_uncollectible"], description: "Action after all retries exhausted." },
+      is_default: { type: "boolean", description: "Whether this becomes the merchant default policy." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Update dunning policy" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { policy_id, ...updates } = args;
+    return ctx.api.patch(`/v1/billing/dunning/policies/${encodeURIComponent(policy_id)}`, {
+      body: {
+        name: updates.name,
+        retryIntervalsDays: updates.retry_intervals_days,
+        finalAction: updates.final_action,
+        isDefault: updates.is_default
+      }
+    });
+  }
+};
+var set_subscription_dunning_policy = {
+  name: "set_subscription_dunning_policy",
+  description: "Assign a dunning policy to a specific subscription, overriding the merchant default. Pass policyId: null to revert to the merchant default.",
+  inputSchema: {
+    type: "object",
+    required: ["subscription_id"],
+    properties: {
+      subscription_id: { type: "string", description: "Subscription id." },
+      policy_id: { type: ["string", "null"], description: "Dunning policy id, or null to use merchant default." }
+    },
+    additionalProperties: false
+  },
+  annotations: { title: "Set subscription dunning policy" },
+  requiredScopes: ["billing:write"],
+  async handler(args, ctx) {
+    const { subscription_id, policy_id } = args;
+    return ctx.api.post(`/v1/billing/dunning/subscriptions/${encodeURIComponent(subscription_id)}/policy`, {
+      body: { policyId: policy_id ?? null }
+    });
   }
 };
 
@@ -1263,7 +1853,7 @@ var create_payment_link = {
       },
       provider: {
         type: "string",
-        enum: ["esewa", "khalti", "connectips", "hamropay", "imepay"],
+        enum: ["esewa", "khalti", "connectips", "hamropay"],
         description: "Lock to a single provider. Omit to let the customer pick."
       },
       max_uses: {
@@ -1465,6 +2055,18 @@ var READ_TOOLS = [
   get_subscription,
   list_invoices,
   get_invoice,
+  list_coupons,
+  get_coupon,
+  list_promotion_codes,
+  get_promotion_code,
+  validate_promotion_code,
+  get_tax_settings,
+  list_dunning_policies,
+  get_dunning_invoice_status,
+  preview_subscription_proration,
+  get_subscription_usage_summary,
+  list_usage_records,
+  list_invoice_items,
   get_analytics_overview
 ];
 var WRITE_TOOLS = [
@@ -1481,11 +2083,30 @@ var WRITE_TOOLS = [
   update_plan,
   create_customer,
   update_customer,
+  add_customer_credit,
   create_subscription,
   pause_subscription,
   resume_subscription,
   cancel_subscription,
-  change_subscription_plan
+  change_subscription_plan,
+  end_subscription_trial,
+  extend_subscription_trial,
+  create_coupon,
+  deactivate_coupon,
+  create_promotion_code,
+  deactivate_promotion_code,
+  apply_coupon_to_subscription,
+  remove_subscription_discount,
+  update_tax_settings,
+  create_dunning_policy,
+  stop_invoice_dunning,
+  retry_invoice_dunning_now,
+  set_subscription_dunning_policy,
+  report_subscription_usage,
+  update_subscription_quantity,
+  create_invoice_item,
+  delete_invoice_item,
+  update_dunning_policy
 ];
 var TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
 var TOOL_MAP = new Map(
