@@ -5,7 +5,9 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
-  ListToolsRequestSchema
+  ListToolsRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 
 // ../mcp-core/src/errors.ts
@@ -307,6 +309,7 @@ async function dispatchTool(def, args, ctx) {
       elapsed_ms: Date.now() - startedAt,
       result: "error",
       args_hash: argsHash,
+      client_name: ctx.clientName,
       error_code: errorCode(err)
     });
     throw err;
@@ -315,7 +318,8 @@ async function dispatchTool(def, args, ctx) {
     tool: def.name,
     elapsed_ms: Date.now() - startedAt,
     result: "ok",
-    args_hash: argsHash
+    args_hash: argsHash,
+    client_name: ctx.clientName
   });
   return result;
 }
@@ -1535,7 +1539,7 @@ var stop_invoice_dunning = {
   requiredScopes: ["billing:write"],
   async handler(args, ctx) {
     const { invoice_id } = args;
-    await confirmDestructive(ctx, `Stop dunning for invoice ${invoice_id}? No further reminders will be sent.`);
+    await confirmDestructive(ctx.elicit, { message: `Stop dunning for invoice ${invoice_id}? No further reminders will be sent.`, summary: { invoice_id } });
     return ctx.api.post(`/v1/billing/dunning/invoices/${encodeURIComponent(invoice_id)}/dunning/stop`, { body: {} });
   }
 };
@@ -2116,6 +2120,310 @@ function getTool(name) {
   return TOOL_MAP.get(name);
 }
 
+// ../mcp-core/src/prompts/reconciliation.ts
+var monthly_reconciliation = {
+  name: "monthly_reconciliation",
+  description: "Pull a full month's payment reconciliation \u2014 gross volume, net after refunds, success rate, provider breakdown, and top customers. Ready to paste into a spreadsheet or share with your accountant.",
+  arguments: [
+    {
+      name: "month",
+      description: 'Month to reconcile, e.g. "2026-04". Defaults to the current month.',
+      required: false
+    }
+  ],
+  handler(args) {
+    const month = args.month ?? "the current month";
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Run a full payment reconciliation for ${month}.
+
+Steps:
+1. Call get_analytics_overview with a date_range covering ${month} (use the full month \u2014 first to last day).
+2. Call list_payments for the same period to get individual transactions; paginate if the count is large.
+3. Call list_refunds for the same period.
+4. Compute and present:
+   - Gross volume (paisa \u2192 NPR, formatted as "NPR X,XXX.XX")
+   - Total refunds
+   - Net revenue (gross minus refunds)
+   - Success rate (%)
+   - Provider breakdown: eSewa / Khalti / ConnectIPS \u2014 count and NPR amount each
+   - Failed payment count and most common failure reason
+   - Top 5 customers by gross volume (mask emails unless pii:read is granted)
+5. Format the result as a clean markdown table suitable for sharing with an accountant.`
+        }
+      }
+    ];
+  }
+};
+
+// ../mcp-core/src/prompts/investigate.ts
+var investigate_failed_payment = {
+  name: "investigate_failed_payment",
+  description: "Dig into why a payment failed. Provide a payment ID or customer email to focus the investigation, or leave both blank to review all failures in the last 24 hours.",
+  arguments: [
+    {
+      name: "payment_id",
+      description: "ID of a specific payment to investigate (e.g. pay_abc123).",
+      required: false
+    },
+    {
+      name: "customer_email",
+      description: "Customer email \u2014 investigates all failed payments for this customer.",
+      required: false
+    }
+  ],
+  handler(args) {
+    const { payment_id, customer_email } = args;
+    let target;
+    let fetchStep;
+    if (payment_id) {
+      target = `payment ${payment_id}`;
+      fetchStep = `Call get_payment with id "${payment_id}".`;
+    } else if (customer_email) {
+      target = `all failed payments for customer ${customer_email}`;
+      fetchStep = `Call list_payments filtered to status=failed. Filter results to those with customer_email matching "${customer_email}".`;
+    } else {
+      target = "all failed payments in the last 24 hours";
+      fetchStep = `Call list_payments filtered to status=failed, covering the last 24 hours.`;
+    }
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Investigate ${target}.
+
+Steps:
+1. ${fetchStep}
+2. For each failed payment, note the provider_error_code and provider_error_message.
+3. If there is a checkout_session_id on the payment, call get_checkout_session to see the full funnel (which step the customer dropped off at).
+4. Diagnose the root cause \u2014 common causes:
+   - "insufficient_funds" \u2192 customer needs to top up their wallet
+   - "transaction_limit_exceeded" \u2192 amount above provider daily limit
+   - "invalid_credential" \u2192 provider config issue on the merchant's side
+   - "timeout" / "gateway_error" \u2192 transient provider failure \u2014 safe to retry
+5. For each payment, recommend one of:
+   - "Retry" \u2014 transient failure, customer can try again
+   - "Contact customer" \u2014 wallet issue the customer needs to resolve
+   - "Escalate to provider" \u2014 persistent gateway error
+   - "Check merchant credentials" \u2014 provider configuration likely wrong
+6. Summarize findings clearly.`
+        }
+      }
+    ];
+  }
+};
+
+// ../mcp-core/src/prompts/onboard.ts
+var onboard_customer = {
+  name: "onboard_customer",
+  description: "Create a billing customer and subscribe them to a plan in one flow. Optionally validate and apply a coupon.",
+  arguments: [
+    {
+      name: "email",
+      description: "Customer email address.",
+      required: true
+    },
+    {
+      name: "name",
+      description: "Customer full name.",
+      required: true
+    },
+    {
+      name: "plan_id",
+      description: "Plan ID to subscribe the customer to (e.g. plan_abc123). Use list_plans if unsure.",
+      required: true
+    },
+    {
+      name: "coupon_code",
+      description: "Optional promotion code to apply at subscription start.",
+      required: false
+    }
+  ],
+  handler(args) {
+    const { email, name, plan_id, coupon_code } = args;
+    const couponLine = coupon_code ? `
+3b. Call validate_promotion_code with code "${coupon_code}" to confirm it is valid and not expired before using it.` : "";
+    const couponApply = coupon_code ? ` and the validated promotion code "${coupon_code}"` : "";
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Onboard a new billing customer and subscribe them to a plan.
+
+Details:
+- Email: ${email}
+- Name: ${name}
+- Plan: ${plan_id}${coupon_code ? `
+- Coupon: ${coupon_code}` : ""}
+
+Steps:
+1. Call get_plan with id "${plan_id}" to confirm the plan exists. Show the user the plan name, billing interval, and price before proceeding.
+2. Call create_customer with email "${email}" and name "${name}".${couponLine}
+3. Call create_subscription with the new customer's id and plan_id "${plan_id}"${couponApply}.
+4. Confirm success by displaying:
+   - Subscription ID
+   - Plan name and price
+   - Next billing date
+   - Any discount applied (coupon name, % off, duration)
+5. If any step fails, stop and explain the error clearly.`
+        }
+      }
+    ];
+  }
+};
+
+// ../mcp-core/src/prompts/dunning.ts
+var review_dunning = {
+  name: "review_dunning",
+  description: "Review all invoices currently in dunning. Shows retry status for each, categorizes them by recommended action, and lets you stop or force-retry specific invoices.",
+  arguments: [],
+  handler(_args) {
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Review all invoices currently in dunning and recommend action for each.
+
+Steps:
+1. Call list_dunning_policies to show the active retry schedules (retry intervals, max attempts, what happens on final failure).
+2. Call list_invoices with status="past_due" to find all invoices that are overdue.
+3. For each past-due invoice, call get_dunning_invoice_status to get:
+   - Retry count so far
+   - Last attempt timestamp and outcome
+   - Next scheduled retry timestamp
+4. Categorize each invoice as one of:
+   - "Retry now" \u2014 failed once, payment method likely still valid, no retry scheduled soon
+   - "Stop dunning" \u2014 3+ retries with consistent failure, probably a canceled card or closed wallet
+   - "Wait" \u2014 next retry is scheduled within 24 hours, no action needed
+5. Present a summary table with columns: Invoice ID | Customer | Amount (NPR) | Retries | Next Retry | Recommendation
+6. Ask which invoices (if any) to act on \u2014 stop_invoice_dunning for "Stop dunning" rows, retry_invoice_dunning_now for "Retry now" rows. Wait for confirmation before executing any action.`
+        }
+      }
+    ];
+  }
+};
+
+// ../mcp-core/src/prompts/discount.ts
+var apply_discount = {
+  name: "apply_discount",
+  description: "Validate a promotion code and apply it to an existing subscription. Shows the discounted price before applying.",
+  arguments: [
+    {
+      name: "subscription_id",
+      description: "ID of the subscription to discount (e.g. sub_abc123).",
+      required: true
+    },
+    {
+      name: "promotion_code",
+      description: "Promotion code string to validate and apply (e.g. NEPAL20).",
+      required: true
+    }
+  ],
+  handler(args) {
+    const { subscription_id, promotion_code } = args;
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Apply a discount to subscription ${subscription_id}.
+
+Promotion code: ${promotion_code}
+
+Steps:
+1. Call get_subscription with id "${subscription_id}" to confirm:
+   - It is active (not paused or canceled)
+   - The current plan name and price
+   - Whether a discount is already applied
+2. Call validate_promotion_code with code "${promotion_code}" to confirm:
+   - The code exists and is active
+   - It is not expired
+   - It is compatible with the subscription's plan
+3. Show the user the before/after:
+   - Current price: NPR X per interval
+   - Discount: Y% off (or NPR Z off) \u2014 duration (once / repeating N months / forever)
+   - New effective price: NPR X
+4. Ask the user to confirm before applying.
+5. On confirmation, call apply_coupon_to_subscription with the subscription id and promotion code.
+6. Confirm success: show the new discounted amount and when (if ever) the discount expires.`
+        }
+      }
+    ];
+  }
+};
+
+// ../mcp-core/src/prompts/daily.ts
+var daily_summary = {
+  name: "daily_summary",
+  description: "End-of-day digest: today's revenue, payment counts, refunds, checkout funnel, and any failed webhooks. One clean summary, no extra steps.",
+  arguments: [],
+  handler(_args) {
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Give me a clean end-of-day summary for today.
+
+Steps:
+1. Call get_analytics_overview with date_range="1d" to get today's headline KPIs.
+2. Call list_payments to get today's payments \u2014 count successes and failures, note the most common failure reason if any.
+3. Call list_refunds for today \u2014 count and total amount.
+4. Call list_checkout_sessions for today \u2014 compare sessions started vs completed to compute the completion rate.
+5. Call list_webhook_endpoints, then for one or two key endpoints call list_webhook_deliveries to spot any failures in the last 24 hours.
+6. Format the output as a concise daily digest:
+
+---
+**PayBridgeNP \u2014 Daily Summary**
+*[today's date]*
+
+**Revenue**
+- Gross: NPR X,XXX.XX
+- Refunds: NPR X,XXX.XX
+- Net: NPR X,XXX.XX
+
+**Payments**
+- Succeeded: X (NPR X,XXX.XX)
+- Failed: X | Success rate: X%
+- Providers: eSewa X% \xB7 Khalti X% \xB7 ConnectIPS X%
+
+**Refunds**
+- Count: X | Total: NPR X,XXX.XX
+
+**Checkout Funnel**
+- Sessions started: X | Completed: X | Completion rate: X%
+
+**Webhooks**
+- Failed deliveries: X (list endpoint + error if any)
+---`
+        }
+      }
+    ];
+  }
+};
+
+// ../mcp-core/src/prompts/index.ts
+var PROMPTS = [
+  daily_summary,
+  monthly_reconciliation,
+  investigate_failed_payment,
+  onboard_customer,
+  review_dunning,
+  apply_discount
+];
+var PROMPT_MAP = new Map(
+  PROMPTS.map((p) => [p.name, p])
+);
+function getPrompt(name) {
+  return PROMPT_MAP.get(name);
+}
+
 // src/index.ts
 function readApiKey() {
   const fromEnv = process.env.PAYBRIDGE_API_KEY;
@@ -2139,6 +2447,7 @@ async function main() {
     {
       capabilities: {
         tools: { listChanged: false },
+        prompts: { listChanged: false },
         logging: {}
       }
     }
@@ -2199,6 +2508,25 @@ async function main() {
       }
       return errorResult(`Tool ${name} failed: ${err.message}`);
     }
+  });
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: PROMPTS.map((p) => ({
+      name: p.name,
+      description: p.description,
+      arguments: p.arguments ?? []
+    }))
+  }));
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    const name = req.params.name;
+    const args = req.params.arguments ?? {};
+    const prompt = getPrompt(name);
+    if (!prompt) {
+      throw new Error(`Unknown prompt: ${name}`);
+    }
+    return {
+      description: prompt.description,
+      messages: prompt.handler(args)
+    };
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

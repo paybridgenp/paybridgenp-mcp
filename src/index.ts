@@ -21,11 +21,15 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   ApiClient,
   TOOLS,
   getTool,
+  PROMPTS,
+  getPrompt,
   McpToolError,
   ScopeError,
   redactResponse,
@@ -64,6 +68,7 @@ async function main(): Promise<void> {
     {
       capabilities: {
         tools: { listChanged: false },
+        prompts: { listChanged: false },
         logging: {},
       },
     },
@@ -138,6 +143,29 @@ async function main(): Promise<void> {
       }
       return errorResult(`Tool ${name} failed: ${(err as Error).message}`);
     }
+  });
+
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: PROMPTS.map((p) => ({
+      name: p.name,
+      description: p.description,
+      arguments: p.arguments ?? [],
+    })),
+  }));
+
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    const name = req.params.name;
+    const args = (req.params.arguments ?? {}) as Record<string, string>;
+    const prompt = getPrompt(name);
+
+    if (!prompt) {
+      throw new Error(`Unknown prompt: ${name}`);
+    }
+
+    return {
+      description: prompt.description,
+      messages: prompt.handler(args),
+    };
   });
 
   const transport = new StdioServerTransport();
