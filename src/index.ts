@@ -1,4 +1,4 @@
-// Stdio entry for @paybridge-np/mcp. Reads PAYBRIDGE_API_KEY from env (or
+// Stdio entry for @paybridge-np/mcp. Reads PAYBRIDGENP_API_KEY from env (or
 // --api-key=... flag), wires up an ApiClient + StdioServerTransport, and
 // registers every tool exported by @paybridge/mcp-core.
 //
@@ -11,7 +11,7 @@
 //       "paybridge": {
 //         "command": "npx",
 //         "args": ["-y", "@paybridge-np/mcp@latest"],
-//         "env": { "PAYBRIDGE_API_KEY": "sk_live_..." }
+//         "env": { "PAYBRIDGENP_API_KEY": "sk_live_..." }
 //       }
 //     }
 //   }
@@ -41,18 +41,18 @@ import {
 } from "@paybridge/mcp-core";
 
 function readApiKey(): string {
-  const fromEnv = process.env.PAYBRIDGE_API_KEY;
+  const fromEnv = process.env.PAYBRIDGENP_API_KEY;
   if (fromEnv) return fromEnv;
   const flag = process.argv.find((a) => a.startsWith("--api-key="));
   if (flag) return flag.slice("--api-key=".length);
   throw new Error(
-    "Missing PayBridgeNP API key. Set PAYBRIDGE_API_KEY in env or pass --api-key=sk_live_...",
+    "Missing PayBridgeNP API key. Set PAYBRIDGENP_API_KEY in env or pass --api-key=sk_live_...",
   );
 }
 
 async function main(): Promise<void> {
   const apiKey = readApiKey();
-  const baseUrl = process.env.PAYBRIDGE_API_BASE_URL;
+  const baseUrl = process.env.PAYBRIDGENP_API_BASE_URL;
 
   const api = new ApiClient({ apiKey, baseUrl });
 
