@@ -19,7 +19,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "command": "npx",
       "args": ["-y", "@paybridge-np/mcp@latest"],
       "env": {
-        "PAYBRIDGE_API_KEY": "sk_live_..."
+        "PAYBRIDGENP_API_KEY": "sk_live_..."
       }
     }
   }
@@ -36,7 +36,7 @@ Same JSON in `.cursor/mcp.json` or via Settings → MCP.
 
 ```bash
 claude mcp add paybridge \
-  --env PAYBRIDGE_API_KEY=sk_live_... \
+  --env PAYBRIDGENP_API_KEY=sk_live_... \
   -- npx -y @paybridge-np/mcp@latest
 ```
 
@@ -51,7 +51,7 @@ claude mcp add paybridge \
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@paybridge-np/mcp@latest"],
-      "env": { "PAYBRIDGE_API_KEY": "sk_live_..." }
+      "env": { "PAYBRIDGENP_API_KEY": "sk_live_..." }
     }
   }
 }
@@ -129,8 +129,8 @@ Money-moving tools (`create_refund`, `cancel_subscription`, `delete_*`) require 
 
 | Env var | Required | Default |
 |---|---|---|
-| `PAYBRIDGE_API_KEY` | yes | — |
-| `PAYBRIDGE_API_BASE_URL` | no | `https://api.paybridgenp.com` |
+| `PAYBRIDGENP_API_KEY` | yes | — |
+| `PAYBRIDGENP_API_BASE_URL` | no | `https://api.paybridgenp.com` |
 
 You can also pass `--api-key=sk_live_...` as a CLI argument.
 
