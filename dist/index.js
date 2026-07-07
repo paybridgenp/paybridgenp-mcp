@@ -59,7 +59,7 @@ var ApiClient = class {
       throw new McpToolError("unauthorized", "Missing PayBridgeNP API key", 401);
     }
     this.apiKey = cfg.apiKey;
-    this.baseUrl = (cfg.baseUrl ?? process.env.PAYBRIDGE_API_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+    this.baseUrl = (cfg.baseUrl ?? process.env.PAYBRIDGENP_API_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = cfg.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.userAgent = cfg.userAgent ?? `PayBridgeNP-MCP/${process.env.npm_package_version ?? "0.1.0"}`;
@@ -491,7 +491,7 @@ var get_payment = {
 };
 var create_checkout_session = {
   name: "create_checkout_session",
-  description: "Create a hosted checkout session and return its checkout_url. Amount is in PAISA (e.g., 50000 = Rs 500). Customer is redirected to PayBridge to pick eSewa/Khalti/ConnectIPS and pay. Asks for confirmation when amount is large (default >= Rs 5,000).",
+  description: "Create a hosted checkout session and return its checkout_url. Amount is in PAISA (e.g., 50000 = Rs 500). Customer is redirected to PayBridgeNP to pick eSewa/Khalti/Fonepay and pay. Asks for confirmation when amount is large (default >= Rs 5,000).",
   inputSchema: {
     type: "object",
     properties: {
@@ -507,7 +507,7 @@ var create_checkout_session = {
       },
       provider: {
         type: "string",
-        enum: ["esewa", "khalti", "connectips"],
+        enum: ["esewa", "khalti", "fonepay"],
         description: "Lock the session to a single provider. Omit to let the customer pick."
       },
       return_url: {
@@ -889,7 +889,7 @@ var get_customer = {
 };
 var list_subscriptions = {
   name: "list_subscriptions",
-  description: "List subscriptions. Each subscription links a customer to a plan and tracks status (active, past_due, paused, cancelled, completed) plus current period.",
+  description: "List subscriptions. Each subscription links a customer to a plan and tracks status (incomplete, incomplete_expired, active, past_due, paused, cancelled, completed) plus current period. A subscription is 'incomplete' until its first invoice is paid, then 'active' (prepaid activation).",
   inputSchema: cursorAndLimitSchema,
   annotations: { readOnlyHint: true, title: "List subscriptions" },
   requiredScopes: ["billing:read"],
@@ -2149,7 +2149,7 @@ Steps:
    - Total refunds
    - Net revenue (gross minus refunds)
    - Success rate (%)
-   - Provider breakdown: eSewa / Khalti / ConnectIPS \u2014 count and NPR amount each
+   - Provider breakdown: eSewa / Khalti / Fonepay \u2014 count and NPR amount each
    - Failed payment count and most common failure reason
    - Top 5 customers by gross volume (mask emails unless pii:read is granted)
 5. Format the result as a clean markdown table suitable for sharing with an accountant.`
@@ -2391,7 +2391,7 @@ Steps:
 **Payments**
 - Succeeded: X (NPR X,XXX.XX)
 - Failed: X | Success rate: X%
-- Providers: eSewa X% \xB7 Khalti X% \xB7 ConnectIPS X%
+- Providers: eSewa X% \xB7 Khalti X% \xB7 Fonepay X%
 
 **Refunds**
 - Count: X | Total: NPR X,XXX.XX
@@ -2426,17 +2426,17 @@ function getPrompt(name) {
 
 // src/index.ts
 function readApiKey() {
-  const fromEnv = process.env.PAYBRIDGE_API_KEY;
+  const fromEnv = process.env.PAYBRIDGENP_API_KEY;
   if (fromEnv) return fromEnv;
   const flag = process.argv.find((a) => a.startsWith("--api-key="));
   if (flag) return flag.slice("--api-key=".length);
   throw new Error(
-    "Missing PayBridgeNP API key. Set PAYBRIDGE_API_KEY in env or pass --api-key=sk_live_..."
+    "Missing PayBridgeNP API key. Set PAYBRIDGENP_API_KEY in env or pass --api-key=sk_live_..."
   );
 }
 async function main() {
   const apiKey = readApiKey();
-  const baseUrl = process.env.PAYBRIDGE_API_BASE_URL;
+  const baseUrl = process.env.PAYBRIDGENP_API_BASE_URL;
   const api = new ApiClient({ apiKey, baseUrl });
   const scope = { granted: null };
   const server = new Server(
