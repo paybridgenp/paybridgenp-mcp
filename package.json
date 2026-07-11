@@ -1,6 +1,6 @@
 {
   "name": "@paybridge-np/mcp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Official Model Context Protocol (MCP) server for PayBridgeNP \u2014 lets Claude, ChatGPT, Cursor, and any MCP-compatible AI assistant manage your PayBridgeNP account through natural language",
   "type": "module",
   "main": "./dist/index.js",

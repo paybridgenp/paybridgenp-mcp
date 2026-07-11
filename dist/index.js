@@ -43,6 +43,9 @@ function fromUpstream(status, body) {
   }
 }
 
+// ../mcp-core/src/version.ts
+var MCP_CORE_VERSION = "1.1.0";
+
 // ../mcp-core/src/client/api.ts
 var DEFAULT_BASE_URL = "https://api.paybridgenp.com";
 var DEFAULT_TIMEOUT_MS = 3e4;
@@ -62,7 +65,7 @@ var ApiClient = class {
     this.baseUrl = (cfg.baseUrl ?? process.env.PAYBRIDGENP_API_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = cfg.maxRetries ?? DEFAULT_MAX_RETRIES;
-    this.userAgent = cfg.userAgent ?? `PayBridgeNP-MCP/${process.env.npm_package_version ?? "0.1.0"}`;
+    this.userAgent = cfg.userAgent ?? `PayBridgeNP-MCP/${process.env.npm_package_version ?? MCP_CORE_VERSION}`;
   }
   get(path, opts) {
     return this.request("GET", path, opts);
@@ -395,9 +398,6 @@ async function confirmDestructive(elicit, req) {
 function humanise(snake2) {
   return snake2.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 }
-
-// ../mcp-core/src/version.ts
-var MCP_CORE_VERSION = "0.1.0";
 
 // ../mcp-core/src/tools/_helpers.ts
 var DEFAULT_LIMIT = 25;
@@ -1040,13 +1040,17 @@ var update_customer = {
 };
 var add_customer_credit = {
   name: "add_customer_credit",
-  description: "Add (or deduct, with a negative amount) credits to a customer's balance. Credits are applied automatically against future invoices before payment. Amount is in paisa (NPR \xD7 100).",
+  description: "Add credit to a customer's balance. Credit is applied automatically against future invoices before payment. Amount is in paisa (NPR \xD7 100) and must be positive \u2014 this endpoint is credit-only and rejects zero or negative amounts.",
   inputSchema: {
     type: "object",
     properties: {
       customer_id: { type: "string" },
-      amount: { type: "number", description: "Amount in paisa. Use negative to deduct." },
-      note: { type: "string", description: "Optional note for the credit entry." }
+      amount: { type: "number", description: "Amount in paisa. Must be a positive integer (credit-only; negative/zero is rejected)." },
+      note: { type: "string", description: "Optional note for the credit entry." },
+      idempotency_key: {
+        type: "string",
+        description: "Optional Idempotency-Key \u2014 pass the SAME key when safe-retrying so a network retry can't apply the credit twice."
+      }
     },
     required: ["customer_id", "amount"],
     additionalProperties: false
@@ -1056,7 +1060,8 @@ var add_customer_credit = {
   async handler(args, ctx) {
     const a = args;
     return ctx.api.post(`/v1/billing/customers/${encodeURIComponent(a.customer_id)}/credit`, {
-      body: { amount: a.amount, note: a.note }
+      body: { amount: a.amount, note: a.note },
+      idempotencyKey: a.idempotency_key
     });
   }
 };
@@ -1070,7 +1075,11 @@ var create_subscription = {
       plan_id: { type: "string" },
       start_date: { type: "string", format: "date-time", description: "Optional ISO timestamp; defaults to now." },
       quantity: { type: "number", description: "Per-seat multiplier (default 1). Only applies to per_unit plans." },
-      billing_anchor_day: { type: "number", description: "Pin the period-end to this calendar day (1-28) for month/quarter/year intervals." }
+      billing_anchor_day: { type: "number", description: "Pin the period-end to this calendar day (1-28) for month/quarter/year intervals." },
+      idempotency_key: {
+        type: "string",
+        description: "Optional Idempotency-Key \u2014 pass the SAME key when safe-retrying so a network retry can't create a duplicate subscription (and duplicate first invoice)."
+      }
     },
     required: ["customer_id", "plan_id"],
     additionalProperties: false
@@ -1080,7 +1089,8 @@ var create_subscription = {
   async handler(args, ctx) {
     const a = args;
     return ctx.api.post("/v1/billing/subscriptions", {
-      body: { customerId: a.customer_id, planId: a.plan_id, startDate: a.start_date, quantity: a.quantity, billingAnchorDay: a.billing_anchor_day }
+      body: { customerId: a.customer_id, planId: a.plan_id, startDate: a.start_date, quantity: a.quantity, billingAnchorDay: a.billing_anchor_day },
+      idempotencyKey: a.idempotency_key
     });
   }
 };
@@ -1539,7 +1549,10 @@ var stop_invoice_dunning = {
   requiredScopes: ["billing:write"],
   async handler(args, ctx) {
     const { invoice_id } = args;
-    await confirmDestructive(ctx.elicit, { message: `Stop dunning for invoice ${invoice_id}? No further reminders will be sent.`, summary: { invoice_id } });
+    const ok = await confirmDestructive(ctx.elicit, { message: `Stop dunning for invoice ${invoice_id}? No further reminders will be sent.`, summary: { invoice_id } });
+    if (!ok) {
+      throw new McpToolError("user_cancelled", "Stop-dunning rejected by user.", 0);
+    }
     return ctx.api.post(`/v1/billing/dunning/invoices/${encodeURIComponent(invoice_id)}/dunning/stop`, { body: {} });
   }
 };
@@ -1604,7 +1617,11 @@ var create_invoice_item = {
       subscription_id: { type: "string", description: "Subscription id." },
       description: { type: "string", description: "Line item description shown on the invoice." },
       amount: { type: "number", description: "Amount in paisa. Must be > 0." },
-      quantity: { type: "number", description: "Quantity multiplier (default 1)." }
+      quantity: { type: "number", description: "Quantity multiplier (default 1)." },
+      idempotency_key: {
+        type: "string",
+        description: "Optional Idempotency-Key \u2014 pass the SAME key when safe-retrying so a network retry can't add the one-off charge twice."
+      }
     },
     additionalProperties: false
   },
@@ -1613,7 +1630,8 @@ var create_invoice_item = {
   async handler(args, ctx) {
     const a = args;
     return ctx.api.post(`/v1/billing/subscriptions/${encodeURIComponent(a.subscription_id)}/invoice-items`, {
-      body: { description: a.description, amount: a.amount, quantity: a.quantity }
+      body: { description: a.description, amount: a.amount, quantity: a.quantity },
+      idempotencyKey: a.idempotency_key
     });
   }
 };
@@ -1857,7 +1875,7 @@ var create_payment_link = {
       },
       provider: {
         type: "string",
-        enum: ["esewa", "khalti", "connectips", "hamropay"],
+        enum: ["esewa", "khalti", "fonepay"],
         description: "Lock to a single provider. Omit to let the customer pick."
       },
       max_uses: {
