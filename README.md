@@ -61,7 +61,7 @@ Generate a scoped MCP token from your [PayBridgeNP dashboard](https://dashboard.
 
 ## Tools (69)
 
-### Read (31)
+### Read (32)
 
 | Category | Tools |
 |---|---|
@@ -74,7 +74,7 @@ Generate a scoped MCP token from your [PayBridgeNP dashboard](https://dashboard.
 | Plans | `list_plans`, `get_plan` |
 | Customers | `list_customers`, `get_customer` |
 | Subscriptions | `list_subscriptions`, `get_subscription` |
-| Invoices | `list_invoices`, `get_invoice` |
+| Invoices | `list_invoices`, `get_invoice`, `list_invoice_items` |
 | Coupons | `list_coupons`, `get_coupon` |
 | Promotions | `list_promotion_codes`, `get_promotion_code`, `validate_promotion_code` |
 | Tax | `get_tax_settings` |
@@ -82,7 +82,7 @@ Generate a scoped MCP token from your [PayBridgeNP dashboard](https://dashboard.
 | Usage | `preview_subscription_proration`, `get_subscription_usage_summary`, `list_usage_records` |
 | Analytics | `get_analytics_overview` |
 
-### Write (38)
+### Write (37)
 
 Money-moving tools (`create_refund`, `cancel_subscription`, `delete_*`) require explicit confirmation in the host UI before executing.
 
@@ -94,7 +94,7 @@ Money-moving tools (`create_refund`, `cancel_subscription`, `delete_*`) require 
 | Webhooks | `create_webhook_endpoint`, `update_webhook_endpoint`, `delete_webhook_endpoint` |
 | Plans | `create_plan`, `update_plan` |
 | Customers | `create_customer`, `update_customer`, `add_customer_credit` |
-| Subscriptions | `create_subscription`, `pause_subscription`, `resume_subscription`, `cancel_subscription`, `change_subscription_plan`, `end_trial`, `extend_trial` |
+| Subscriptions | `create_subscription`, `pause_subscription`, `resume_subscription`, `cancel_subscription`, `change_subscription_plan`, `end_subscription_trial`, `extend_subscription_trial` |
 | Invoices | `create_invoice_item`, `delete_invoice_item` |
 | Coupons | `create_coupon`, `deactivate_coupon` |
 | Promotions | `create_promotion_code`, `deactivate_promotion_code`, `apply_coupon_to_subscription`, `remove_subscription_discount` |
