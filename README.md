@@ -2,7 +2,7 @@
 
 Official [Model Context Protocol](https://modelcontextprotocol.io) server for [PayBridgeNP](https://paybridgenp.com), the Nepali payment gateway.
 
-Lets Claude, ChatGPT, Cursor, Claude Code, VS Code — any MCP-compatible AI assistant — read and act on your PayBridgeNP account through natural language. Issue refunds, create payment links, manage subscriptions, inspect failed webhooks, pull KPIs — all by chatting.
+Lets Claude, ChatGPT, Cursor, Claude Code, VS Code - any MCP-compatible AI assistant - read and act on your PayBridgeNP account through natural language. Issue refunds, create payment links, manage subscriptions, inspect failed webhooks, pull KPIs - all by chatting.
 
 **69 tools. 6 built-in prompt templates. Scoped tokens. Spend caps. Full audit trail.**
 
@@ -104,26 +104,26 @@ Money-moving tools (`create_refund`, `cancel_subscription`, `delete_*`) require 
 
 ## Prompts
 
-6 built-in prompt templates — appear as slash commands in Claude Desktop and Cursor (`/` → type `paybridge`):
+6 built-in prompt templates - appear as slash commands in Claude Desktop and Cursor (`/` → type `paybridge`):
 
 | Prompt | What it does |
 |---|---|
 | `daily_summary` | End-of-day digest: revenue, payments, refunds, checkout funnel, webhook failures |
 | `monthly_reconciliation` | Full month reconciliation table ready to share with your accountant. Takes optional `month` arg (e.g. `2026-04`) |
-| `investigate_failed_payment` | Diagnose why payments failed — takes optional `payment_id` or `customer_email` |
+| `investigate_failed_payment` | Diagnose why payments failed - takes optional `payment_id` or `customer_email` |
 | `onboard_customer` | Create a customer + subscribe to a plan in one flow. Takes `email`, `name`, `plan_id`, optional `coupon_code` |
 | `review_dunning` | List all past-due invoices, categorize as retry/stop/wait, act with confirmation |
 | `apply_discount` | Validate and apply a promo code to a subscription, showing before/after price first |
 
 ## Security
 
-- **Scoped tokens** — 16 scopes grouped Read / Write / Sensitive. Read-only by default, writes opt-in per category. PII (email, phone) is its own scope.
-- **Elicitation gates** — refunds and large checkout sessions require explicit confirmation in the host UI before executing.
-- **24-hour spend cap** — hard rolling cap on refunds + checkout sessions per token. Auto-prefilled to Rs 50,000 on write tokens.
-- **Per-token rate limits** — 60 calls/60s overall, 6 destructive/60s, 2 elicitation-gated/60s.
-- **Prompt-injection defense** — customer-controlled fields wrapped as `<untrusted>` data. Zero-width characters stripped. Secrets pattern-redacted on output.
-- **Full audit trail** — every tool call recorded with token id and assistant name, visible in `/dashboard/mcp`.
-- **Open source** — audit exactly what runs against your key at [github.com/paybridgenp/paybridgenp-mcp](https://github.com/paybridgenp/paybridgenp-mcp).
+- **Scoped tokens** - 16 scopes grouped Read / Write / Sensitive. Read-only by default, writes opt-in per category. PII (email, phone) is its own scope.
+- **Elicitation gates** - refunds and large checkout sessions require explicit confirmation in the host UI before executing.
+- **24-hour spend cap** - hard rolling cap on refunds + checkout sessions per token. Auto-prefilled to Rs 50,000 on write tokens.
+- **Per-token rate limits** - 60 calls/60s overall, 6 destructive/60s, 2 elicitation-gated/60s.
+- **Prompt-injection defense** - customer-controlled fields wrapped as `<untrusted>` data. Zero-width characters stripped. Secrets pattern-redacted on output.
+- **Full audit trail** - every tool call recorded with token id and assistant name, visible in `/dashboard/mcp`.
+- **Open source** - audit exactly what runs against your key at [github.com/paybridgenp/paybridgenp-mcp](https://github.com/paybridgenp/paybridgenp-mcp).
 
 ## Configuration
 
@@ -136,4 +136,4 @@ You can also pass `--api-key=sk_live_...` as a CLI argument.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT - see `LICENSE`.
