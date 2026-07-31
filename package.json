@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
+    "@paybridge/mcp-core": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
