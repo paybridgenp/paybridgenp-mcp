@@ -10,7 +10,7 @@ import {
   GetPromptRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 
-// ../mcp-core/src/errors.ts
+//
 var McpToolError = class extends Error {
   code;
   statusCode;
@@ -43,10 +43,10 @@ function fromUpstream(status, body) {
   }
 }
 
-// ../mcp-core/src/version.ts
-var MCP_CORE_VERSION = "1.1.0";
+//
+var MCP_CORE_VERSION = "1.2.0";
 
-// ../mcp-core/src/client/api.ts
+//
 var DEFAULT_BASE_URL = "https://api.paybridgenp.com";
 var DEFAULT_TIMEOUT_MS = 3e4;
 var DEFAULT_MAX_RETRIES = 2;
@@ -151,7 +151,7 @@ function backoff(attempt) {
   return 500 * 2 ** (attempt - 1) + Math.random() * 100;
 }
 
-// ../mcp-core/src/scopes.ts
+//
 function hasScope(ctx, required) {
   if (ctx.granted === null) return true;
   return ctx.granted.includes(required);
@@ -166,7 +166,7 @@ var ScopeError = class extends Error {
   }
 };
 
-// ../mcp-core/src/redact.ts
+//
 var SECRET_PATTERNS = [
   [/\bsk_(live|test)_[A-Za-z0-9]{16,}\b/g, "[REDACTED:secret_key]"],
   [/\bpk_(live|test)_[A-Za-z0-9]{16,}\b/g, "[REDACTED:publishable_key]"],
@@ -297,7 +297,7 @@ function snake(s) {
   return s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`).replace(/^_/, "");
 }
 
-// ../mcp-core/src/dispatch.ts
+//
 import { createHash } from "crypto";
 var AUDIT_PATH = "/v1/internal/mcp-audit";
 async function dispatchTool(def, args, ctx) {
@@ -357,7 +357,7 @@ function errorCode(err) {
   return "tool_error";
 }
 
-// ../mcp-core/src/elicit.ts
+//
 async function confirmDestructive(elicit, req) {
   if (!elicit) {
     throw new McpToolError(
@@ -399,7 +399,7 @@ function humanise(snake2) {
   return snake2.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 }
 
-// ../mcp-core/src/tools/_helpers.ts
+//
 var DEFAULT_LIMIT = 25;
 var MAX_LIMIT = 100;
 function encodeCursor(c) {
@@ -459,7 +459,7 @@ function idOnlySchema(name, description) {
   };
 }
 
-// ../mcp-core/src/tools/payments.ts
+//
 var ELICIT_THRESHOLD_PAISA = 5e5;
 var list_payments = {
   name: "list_payments",
@@ -584,7 +584,136 @@ var create_checkout_session = {
   }
 };
 
-// ../mcp-core/src/tools/refunds.ts
+//
+var DOCS_BASE = (process.env.PAYBRIDGENP_DOCS_URL ?? "https://docs.paybridgenp.com").replace(/\/$/, "");
+var INDEX_TTL_MS = 15 * 60 * 1e3;
+var PAGE_TTL_MS = 15 * 60 * 1e3;
+var FETCH_TIMEOUT_MS = 8e3;
+var MAX_SNIPPET_FETCHES = 3;
+var SNIPPET_RADIUS = 350;
+var indexCache = null;
+var pageCache = /* @__PURE__ */ new Map();
+function isDocsOrigin(url) {
+  try {
+    return new URL(url).origin === new URL(DOCS_BASE).origin;
+  } catch {
+    return false;
+  }
+}
+async function fetchText(url) {
+  if (!isDocsOrigin(url)) return null;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "error" });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  }
+}
+async function loadIndex() {
+  if (indexCache && Date.now() - indexCache.at < INDEX_TTL_MS) return indexCache.entries;
+  const text = await fetchText(`${DOCS_BASE}/llms.txt`);
+  if (!text) return indexCache?.entries ?? [];
+  const entries = [];
+  const re = /^- \[([^\]]+)\]\((https?:[^)]+)\)(?::\s*(.*))?$/;
+  for (const line of text.split("\n")) {
+    const m = re.exec(line.trim());
+    if (m && m[1] && m[2]) entries.push({ title: m[1], url: m[2], description: m[3] ?? "" });
+  }
+  if (entries.length > 0) indexCache = { at: Date.now(), entries };
+  return entries;
+}
+function tokenize(s) {
+  return s.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1);
+}
+function scoreEntry(entry, terms) {
+  const title = entry.title.toLowerCase();
+  const desc = entry.description.toLowerCase();
+  const path = entry.url.toLowerCase();
+  let score = 0;
+  for (const t of terms) {
+    if (title.includes(t)) score += 5;
+    if (path.includes(t)) score += 2;
+    if (desc.includes(t)) score += 1;
+  }
+  return score;
+}
+async function snippetFor(url, terms) {
+  const cached = pageCache.get(url);
+  let text = cached && Date.now() - cached.at < PAGE_TTL_MS ? cached.text : null;
+  if (text === null) {
+    text = await fetchText(url);
+    if (text === null) return null;
+    text = text.replace(/^(?:>.*\n)+\n?/, "").trim();
+    pageCache.set(url, { at: Date.now(), text });
+    if (pageCache.size > 50) {
+      const oldest = [...pageCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) pageCache.delete(oldest[0]);
+    }
+  }
+  const lower = text.toLowerCase();
+  let best = -1;
+  for (const t of terms) {
+    const i = lower.indexOf(t);
+    if (i >= 0 && (best === -1 || i < best)) best = i;
+  }
+  const center = best >= 0 ? best : 0;
+  const start = Math.max(0, center - SNIPPET_RADIUS);
+  const end = Math.min(text.length, center + SNIPPET_RADIUS);
+  const raw = text.slice(start, end).trim();
+  return `${start > 0 ? "\u2026" : ""}${raw}${end < text.length ? "\u2026" : ""}`;
+}
+var search_docs = {
+  name: "search_docs",
+  description: "The authoritative, always-current source for anything about PayBridgeNP: integration guides, API reference, SDKs, webhooks, and provider setup (eSewa, Khalti, Fonepay). ALWAYS use this \u2014 before any web search \u2014 to answer any PayBridgeNP question: 'how do I\u2026', setup, API shape, webhook verification, SDK usage, provider/checkout config, limits, errors. A web search may return outdated or third-party info; this returns PayBridgeNP's own docs (docs.paybridgenp.com) as matching pages with a URL and content snippet.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        minLength: 2,
+        maxLength: 200,
+        description: "Search terms, e.g. 'verify webhook signature' or 'khalti sandbox credentials'."
+      },
+      limit: {
+        type: "integer",
+        minimum: 1,
+        maximum: 10,
+        default: 5,
+        description: "Max results (1\u201310)."
+      }
+    },
+    required: ["query"],
+    additionalProperties: false
+  },
+  annotations: { readOnlyHint: true, title: "Search PayBridgeNP docs" },
+  requiredScopes: ["docs:read"],
+  async handler(args) {
+    const a = args;
+    const limit = Math.min(Math.max(a.limit ?? 5, 1), 10);
+    const terms = tokenize(a.query);
+    const entries = await loadIndex();
+    if (entries.length === 0) {
+      return {
+        query: a.query,
+        results: [],
+        note: "Documentation index is temporarily unreachable. Point the merchant at https://docs.paybridgenp.com directly."
+      };
+    }
+    const ranked = entries.map((e) => ({ e, score: scoreEntry(e, terms) })).filter((r) => r.score > 0).sort((x, y) => y.score - x.score).slice(0, limit);
+    const results = await Promise.all(
+      ranked.map(async ({ e }, i) => ({
+        page: e.title,
+        url: e.url.replace(/\.md$/, ""),
+        description: e.description,
+        snippet: i < MAX_SNIPPET_FETCHES ? await snippetFor(e.url, terms) : null
+      }))
+    );
+    return { query: a.query, results };
+  }
+};
+
+//
 var list_refunds = {
   name: "list_refunds",
   description: "List refunds for the API key's project. Most recent first. Use cursor to page.",
@@ -691,7 +820,7 @@ function formatPaisa(amount, currency) {
   return `${currency} ${major}`;
 }
 
-// ../mcp-core/src/tools/webhooks.ts
+//
 var KNOWN_WEBHOOK_EVENTS = [
   "payment.succeeded",
   "payment.failed",
@@ -833,7 +962,7 @@ var list_webhook_deliveries = {
   }
 };
 
-// ../mcp-core/src/tools/billing.ts
+//
 var INTERVAL_UNITS = ["day", "week", "month", "quarter", "year"];
 var list_plans = {
   name: "list_plans",
@@ -1757,7 +1886,7 @@ var set_subscription_dunning_policy = {
   }
 };
 
-// ../mcp-core/src/tools/sessions.ts
+//
 var list_checkout_sessions = {
   name: "list_checkout_sessions",
   description: "List checkout sessions for the API key's project. A session represents a customer's attempt at paying via the hosted checkout page. Each session has status (pending / initiated / success / failed / expired), amount, customer, and timestamps. Use this to see in-flight or recently abandoned checkouts.",
@@ -1799,7 +1928,7 @@ var get_checkout_session = {
   }
 };
 
-// ../mcp-core/src/tools/links.ts
+//
 var MAX_AMOUNT_PAISA = 1e7;
 var list_payment_links = {
   name: "list_payment_links",
@@ -1974,7 +2103,7 @@ var update_payment_link = {
     const { link_id, ...patch } = a;
     return ctx.api.patch(`/v1/payment-links/${encodeURIComponent(link_id)}`, {
       body: {
-        // Translate snake_case → camelCase for the apps/api PATCH body.
+        // Translate snake_case → camelCase for the API PATCH body.
         title: patch.title,
         description: patch.description,
         active: patch.active,
@@ -2019,7 +2148,7 @@ var delete_payment_link = {
   }
 };
 
-// ../mcp-core/src/tools/analytics.ts
+//
 var get_analytics_overview = {
   name: "get_analytics_overview",
   description: "Headline KPIs for the project over a rolling window (default 30 days, max 90). Returns: total payment count, success / failed counts, success rate, success volume in paisa, checkout funnel (sessions created \u2192 initiated \u2192 paid), per-provider breakdown.",
@@ -2044,7 +2173,7 @@ var get_analytics_overview = {
   }
 };
 
-// ../mcp-core/src/tools/account.ts
+//
 var get_account = {
   name: "get_account",
   description: "Get info about the merchant account, project, and API key the assistant is currently authenticated as. Useful at the start of a session so the agent knows whose account it's operating on, and what scopes / spend cap / expiry are in effect.",
@@ -2056,9 +2185,10 @@ var get_account = {
   }
 };
 
-// ../mcp-core/src/tools/index.ts
+//
 var READ_TOOLS = [
   get_account,
+  search_docs,
   list_payments,
   get_payment,
   list_refunds,
@@ -2138,7 +2268,7 @@ function getTool(name) {
   return TOOL_MAP.get(name);
 }
 
-// ../mcp-core/src/prompts/reconciliation.ts
+//
 var monthly_reconciliation = {
   name: "monthly_reconciliation",
   description: "Pull a full month's payment reconciliation \u2014 gross volume, net after refunds, success rate, provider breakdown, and top customers. Ready to paste into a spreadsheet or share with your accountant.",
@@ -2177,7 +2307,7 @@ Steps:
   }
 };
 
-// ../mcp-core/src/prompts/investigate.ts
+//
 var investigate_failed_payment = {
   name: "investigate_failed_payment",
   description: "Dig into why a payment failed. Provide a payment ID or customer email to focus the investigation, or leave both blank to review all failures in the last 24 hours.",
@@ -2235,7 +2365,7 @@ Steps:
   }
 };
 
-// ../mcp-core/src/prompts/onboard.ts
+//
 var onboard_customer = {
   name: "onboard_customer",
   description: "Create a billing customer and subscribe them to a plan in one flow. Optionally validate and apply a coupon.",
@@ -2295,7 +2425,7 @@ Steps:
   }
 };
 
-// ../mcp-core/src/prompts/dunning.ts
+//
 var review_dunning = {
   name: "review_dunning",
   description: "Review all invoices currently in dunning. Shows retry status for each, categorizes them by recommended action, and lets you stop or force-retry specific invoices.",
@@ -2327,7 +2457,7 @@ Steps:
   }
 };
 
-// ../mcp-core/src/prompts/discount.ts
+//
 var apply_discount = {
   name: "apply_discount",
   description: "Validate a promotion code and apply it to an existing subscription. Shows the discounted price before applying.",
@@ -2376,7 +2506,7 @@ Steps:
   }
 };
 
-// ../mcp-core/src/prompts/daily.ts
+//
 var daily_summary = {
   name: "daily_summary",
   description: "End-of-day digest: today's revenue, payment counts, refunds, checkout funnel, and any failed webhooks. One clean summary, no extra steps.",
@@ -2426,7 +2556,7 @@ Steps:
   }
 };
 
-// ../mcp-core/src/prompts/index.ts
+//
 var PROMPTS = [
   daily_summary,
   monthly_reconciliation,
@@ -2560,4 +2690,3 @@ main().catch((err) => {
 `);
   process.exit(1);
 });
-//# sourceMappingURL=index.js.map
