@@ -4,7 +4,7 @@ Official [Model Context Protocol](https://modelcontextprotocol.io) server for [P
 
 Lets Claude, ChatGPT, Cursor, Claude Code, VS Code - any MCP-compatible AI assistant - read and act on your PayBridgeNP account through natural language. Issue refunds, create payment links, manage subscriptions, inspect failed webhooks, pull KPIs - all by chatting.
 
-**69 tools. 6 built-in prompt templates. Scoped tokens. Spend caps. Full audit trail.**
+**70 tools. 6 built-in prompt templates. Scoped tokens. Spend caps. Full audit trail.**
 
 ## Install
 
@@ -120,7 +120,7 @@ Money-moving tools (`create_refund`, `cancel_subscription`, `delete_*`) require 
 - **Scoped tokens** - 16 scopes grouped Read / Write / Sensitive. Read-only by default, writes opt-in per category. PII (email, phone) is its own scope.
 - **Elicitation gates** - refunds and large checkout sessions require explicit confirmation in the host UI before executing.
 - **24-hour spend cap** - hard rolling cap on refunds + checkout sessions per token. Auto-prefilled to Rs 50,000 on write tokens.
-- **Per-token rate limits** - 60 calls/60s overall, 6 destructive/60s, 2 elicitation-gated/60s.
+- **Per-token rate limits** - on the payment routes: 60 calls/60s overall, 6 destructive/60s, 2 elicitation-gated/60s. Billing routes use the project-level limit (120/min).
 - **Prompt-injection defense** - customer-controlled fields wrapped as `<untrusted>` data. Zero-width characters stripped. Secrets pattern-redacted on output.
 - **Full audit trail** - every tool call recorded with token id and assistant name, visible in `/dashboard/mcp`.
 - **Open source** - audit exactly what runs against your key at [github.com/paybridgenp/paybridgenp-mcp](https://github.com/paybridgenp/paybridgenp-mcp).
